@@ -1,3 +1,4 @@
+# +
 from __future__ import division
 import argparse
 import pandas as pd
@@ -6,7 +7,6 @@ import pandas as pd
 import numpy as np
 from scipy.special import expit
 from sklearn.preprocessing import normalize
-
 
 __authors__ = ['author1','author2','author3']
 __emails__  = ['fatherchristmoas@northpole.dk','toothfairy@blackforest.no','easterbunny@greenfield.de']
@@ -24,10 +24,16 @@ def loadPairs(path):
     pairs = zip(data['word1'],data['word2'],data['similarity'])
     return pairs
 
+# $\frac{\partial l}{\partial c_{pos}} = -(1 - \sigma(c_{pos} w))w$
 
-# +
+# $\frac{\partial l }{\partial w} = -(1-\sigma(c_{pos} w) )c_{pos} + \sum_i^k (1-\sigma(- c_{neg_i} w) )c_{neg_i}]$
+
+# $\frac{\partial l}{\partial c_{neg_i}} = (1 - \sigma(-c_{neg_i} w))w$
+
+
 class SkipGram:
-    def __init__(self, sentences, nEmbed=100, negativeRate=5, winSize = 5, minCount = 5):
+    def __init__(self, sentences, p):
+        
         self.trainset = {sentence for sentence in sentences} # set of sentences
         self.w2id = {} # word to ID mapping
         self.vocab = set() # list of valid words
@@ -42,23 +48,28 @@ class SkipGram:
             for word in sentence:
                 if word not in self.w2id:  
                     self.w2id[word]= len(self.w2id)+1
-                    self.vocab.add(word)    
-                word_id = self.w2id[word] 
-                if word_id in self.w2weight : 
-                    self.w2weight[word_id]+=1
+                    self.vocab.add(word)     
+                if word in self.w2weight : 
+                    self.w2weight[word]+=1
                 else :
-                    self.w2weight[word_id]=1
+                    self.w2weight[word]=1
+        
+        self.target = np.random.rand((self.nEmbed, len(self.vocab)))
+        self.context = np.random.rand((self.nEmbed, len(self.vocab)))
         
         for word in self.vocab :
             if self.w2weight[self.w2id[word]] <= self.minCount : 
                 self.vocab.discard(word)
+                
         
         self.target = np.zeros((self.nEmbed, len(self.vocab)))
         self.context = np.zeros((self.nEmbed, len(self.vocab)))
         self.loss = []
         self.trainWords = 0
         self.accLoss = 0.
-        self.lr = 0.005 
+        self.lr = 0.005
+        self.trained = False
+        self.dict_embedding = {}
       
         
      
@@ -71,7 +82,8 @@ class SkipGram:
         R = np.zeros(self.negativeRate)
         
         i = 0
-        for word_id in enumerate(self.w2weight):
+        for word in self.vocab:
+            word_id = self.w2id
             if ((word_id in omit_ids): continue
             WSum += self.w2weight[word_id]**(3/4)
             
@@ -108,27 +120,36 @@ class SkipGram:
                 self.loss.append(self.accLoss / self.trainWords)
                 self.trainWords = 0
                 self.accLoss = 0.
+        self.trained = True
 
     def trainWord(self, wordId, contextId, negativeIds):
         t = self.target[:, wordId: wordId+1]
-        c = self.context[:, contextId + list(negativeIds)]
-        
-        probabilties = (c.T).dot(t)
-        probabilties = np.exp(probabilties)
-        probabilties = normalize(probabilties)
-        
-        self.accLoss += -np.log(probabilties[0,0])
+        c = self.context[:, [contextId] + list(negativeIds)]
+        dot_product = - (c.T).dot(t)
+        dot_product[0,0] = - dot_product[0,0]
+        dot_product = sigmoid(dot_product)
+        self.accLoss += -(np.log(dot_product).sum())
+            
                 
-        self.target[:, wordId: wordId + 1] = t - \
-                self.lr * (- c[:,0:1] + (c * probabilties.T).sum(axis = 1)[:, None])
-        self.context[:, contextId : contextId] = c[:0:1] - \
-                self.lr * ( (-1 + probabilties[0,0]) * t )
+        self.context[:, contextId : contextId] -= self.lr * ( (-1 + dot_product[0,0]) * t )
+        
         for i in range(self.negativeRate): 
-                self.context[:, negativeIds[i]: negativeIds[i]+1] = self.context[:, negativeIds[i]: negativeIds[i]+1] - \
-                self.lr * ((-1 + probabilties[i+1,0]) * t)
+                self.context[:, negativeIds[i]: negativeIds[i]+1] -= self.lr * ((1- dot_product[i+1,0]) * t)
+                
+        dot_product = 1 - dot_product
+        dot_product[0,0] = - dot_product[0,0]
+        
+        self.target[:, wordId: wordId + 1] -= self.lr * (c.dot(dot_product))
+
 
     def save(self,path):
-        raise NotImplementedError('implement it!')
+        if self.trained:
+            dict_embedding = {}
+            for word in self.vocab:
+                dict_embedding[word] = list(self.target[:, self.w2id[word]])
+        with open(self.path, 'w') as fp:
+            json.dump(dict_embedding, fp)
+                
 
     def similarity(self,word1,word2):
         """
@@ -137,14 +158,25 @@ class SkipGram:
         :param word2:
         :return: a float \in [0,1] indicating the similarity (the higher the more similar)
         """
-       # to implement
-
+        if word_1 not in self.dict_embedding or word2 not in self.dict_embedding: 
+                return 0
+        else: 
+            word_1_embedding = np.array(self.dict_embedding[word1]) 
+            word_2_embedding = np.array(self.dict_embedding[word2])
+            return (normalize(word_1_embedding.reshape(-1,1), axis = 0).T @ \
+                normalize(word_2_embedding.reshape(-1,1), axis = 0)) [0,0]
+        
+    @staticmethod
+    def sigmoid(z):
+        return 1/(1 + np.exp(-z))
+                
     @staticmethod
     def load(path):
-        raise NotImplementedError('implement it!')
-        
-
-# -
+        with open(path, 'r') as fp:
+            d = json.load( fp)
+        skipgram = SkipGram([])
+        skipgram.dict_embedding = d
+        return skipgram
 
 if __name__ == '__main__':
 
@@ -158,7 +190,7 @@ if __name__ == '__main__':
     if not opts.test:
         sentences = text2sentences(opts.text)
         sg = SkipGram(sentences)
-        sg.train(...)
+        sg.train()
         sg.save(opts.model)
 
     else:
@@ -168,4 +200,3 @@ if __name__ == '__main__':
         for a,b,_ in pairs:
             # make sure this does not raise any exception, even if a or b are not in sg.vocab
             print(sg.similarity(a,b))
-
